@@ -228,14 +228,18 @@
       runConfigs = {};
     }
     try {
-      const [data, configs] = await Promise.all([
-        getRunsForProject(project),
-        getRunConfigs(project).catch(() => null),
-      ]);
+      const data = await getRunsForProject(project);
       if (selectedProject !== project) return;
       const newRuns = [...(data || [])].reverse();
+      const runsChanged = JSON.stringify(runs) !== JSON.stringify(newRuns);
 
-      if (JSON.stringify(runs) !== JSON.stringify(newRuns)) {
+      let configs = null;
+      if (runsChanged || project !== runConfigsProject) {
+        configs = await getRunConfigs(project).catch(() => null);
+        if (selectedProject !== project) return;
+      }
+
+      if (runsChanged) {
         const prevSelected = selectedRuns;
         const prevOrdered = runs.map(runKey);
         runs = newRuns;

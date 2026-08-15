@@ -1140,6 +1140,14 @@ def get_logs(
     )
 
 
+def get_run_log_versions(
+    project: str,
+    runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    runs_clean = _normalize_logs_batch_runs(runs)
+    return SQLiteStorage.get_run_log_versions(project, runs_clean)
+
+
 def get_logs_batch(
     project: str,
     runs: list[dict[str, Any]],
@@ -1432,6 +1440,7 @@ def _api_registry() -> dict[str, Any]:
         "get_snapshot": get_snapshot,
         "get_logs": get_logs,
         "get_logs_batch": get_logs_batch,
+        "get_run_log_versions": get_run_log_versions,
         "get_traces": get_traces,
         "get_trace_steps": get_trace_steps,
         "query_project": query_project,

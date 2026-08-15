@@ -223,7 +223,9 @@ class ProcessLock:
             self.lockfile.close()
 
 
-_LOGS_READ_CACHE: dict[tuple[Any, ...], tuple[int, list[dict[str, Any]]]] = {}
+_LOGS_READ_CACHE: dict[
+    tuple[Any, ...], tuple[tuple[int, int], list[dict[str, Any]]]
+] = {}
 _LOGS_READ_CACHE_LOCK = Lock()
 _LOGS_READ_CACHE_MAX_KEYS = 512
 _LOGS_READ_CACHE_MAX_ROWS_PER_ENTRY = 4000
@@ -233,8 +235,34 @@ _METRIC_BUDGET_REFINEMENT_PASSES = 4
 def _spaces_logs_read_cache_enabled() -> bool:
     if not on_spaces():
         return False
+    return _logs_read_cache_enabled()
+
+
+def _logs_read_cache_enabled() -> bool:
     v = os.environ.get("TRACKIO_DISABLE_LOGS_CACHE", "").strip().lower()
     return v not in ("1", "true", "yes")
+
+
+def _run_logs_fingerprint(
+    cursor: sqlite3.Cursor, run_identity: tuple[str, Any] | None
+) -> tuple[int, int]:
+    """Cheap per-run change detector: row count and max step for the run.
+
+    Served by the covering index on (run identity, step), so validating a
+    cache entry does not touch the metrics payloads.
+    """
+    if run_identity is None:
+        return (0, -1)
+    cursor.execute(
+        f"""
+        SELECT COUNT(*), COALESCE(MAX(step), -1)
+        FROM metrics
+        WHERE {run_identity[0]} = ?
+        """,
+        (run_identity[1],),
+    )
+    row = cursor.fetchone()
+    return (row[0], row[1])
 
 
 def _sqlite_db_invalidation_mtime_ns(db_path: Path) -> int | None:
@@ -269,39 +297,33 @@ def _logs_read_cache_key(
 
 
 def _logs_read_cache_get(
-    db_path: Path, key: tuple[Any, ...]
+    key: tuple[Any, ...], fingerprint: tuple[int, int]
 ) -> list[dict[str, Any]] | None:
-    if not _spaces_logs_read_cache_enabled():
-        return None
-    mtime_ns = _sqlite_db_invalidation_mtime_ns(db_path)
-    if mtime_ns is None:
+    if not _logs_read_cache_enabled():
         return None
     with _LOGS_READ_CACHE_LOCK:
         item = _LOGS_READ_CACHE.get(key)
         if item is None:
             return None
-        cached_mtime, logs = item
-        if cached_mtime != mtime_ns:
+        cached_fingerprint, logs = item
+        if cached_fingerprint != fingerprint:
             del _LOGS_READ_CACHE[key]
             return None
     return [{**d} for d in logs]
 
 
 def _logs_read_cache_put(
-    db_path: Path, key: tuple[Any, ...], logs: list[dict[str, Any]]
+    key: tuple[Any, ...], fingerprint: tuple[int, int], logs: list[dict[str, Any]]
 ) -> None:
-    if not _spaces_logs_read_cache_enabled():
+    if not _logs_read_cache_enabled():
         return
     if len(logs) > _LOGS_READ_CACHE_MAX_ROWS_PER_ENTRY:
-        return
-    mtime_ns = _sqlite_db_invalidation_mtime_ns(db_path)
-    if mtime_ns is None:
         return
     snapshot = [{**d} for d in logs]
     with _LOGS_READ_CACHE_LOCK:
         while len(_LOGS_READ_CACHE) >= _LOGS_READ_CACHE_MAX_KEYS:
             _LOGS_READ_CACHE.pop(next(iter(_LOGS_READ_CACHE)))
-        _LOGS_READ_CACHE[key] = (mtime_ns, snapshot)
+        _LOGS_READ_CACHE[key] = (fingerprint, snapshot)
 
 
 _SYSTEM_LOGS_READ_CACHE: dict[tuple[Any, ...], tuple[int, list[dict[str, Any]]]] = {}
@@ -823,6 +845,85 @@ class SQLiteStorage:
             return None
         return ("run_name", resolved)
 
+    _run_records_cache: ClassVar[dict[str, dict[str, Any]]] = {}
+    _run_records_lock: ClassVar[Lock] = Lock()
+
+    @staticmethod
+    def _invalidate_project_read_caches(project: str) -> None:
+        """Drop cached read results for `project` after run mutations.
+
+        Renames rewrite run names in place without changing row counts or
+        ids, which the incremental caches' fingerprints cannot detect.
+        """
+        db_key = str(SQLiteStorage.get_project_db_path(project))
+        with SQLiteStorage._run_records_lock:
+            SQLiteStorage._run_records_cache.pop(db_key, None)
+        with SQLiteStorage._metric_summary_lock:
+            SQLiteStorage._metric_summary_cache.pop(db_key, None)
+        with _LOGS_READ_CACHE_LOCK:
+            for key in [k for k in _LOGS_READ_CACHE if k[0] == project]:
+                del _LOGS_READ_CACHE[key]
+
+    @staticmethod
+    def _fold_run_record_rows(state: dict[str, Any], rows: Iterator) -> None:
+        runs = state["runs"]
+        for row in rows:
+            run_key = (row["run_id"], row["run_name"])
+            created_at = row["timestamp"]
+            prev = runs.get(run_key)
+            if prev is None or (created_at is not None and created_at < prev):
+                runs[run_key] = created_at
+            state["max_id"] = max(state["max_id"], row["id"])
+            state["count"] += 1
+
+    @staticmethod
+    def _cached_run_records(
+        conn: sqlite3.Connection, cache_key: str
+    ) -> list[dict[str, str | None]]:
+        """Incrementally maintained (run_id, run_name, created_at) records.
+
+        Only metric rows appended since the previous call are folded in; any
+        deletion (row count mismatch) triggers a full rebuild. Renames are
+        handled by explicit invalidation in the mutation methods.
+        """
+        cursor = conn.cursor()
+        with SQLiteStorage._run_records_lock:
+            state = SQLiteStorage._run_records_cache.get(cache_key)
+            cursor.execute("SELECT COUNT(*) FROM metrics")
+            total_count = cursor.fetchone()[0]
+
+            if state is not None and total_count < state["count"]:
+                state = None
+            if state is None:
+                state = {"runs": {}, "max_id": 0, "count": 0}
+
+            cursor.execute(
+                """
+                SELECT id, run_id, run_name, timestamp
+                FROM metrics
+                WHERE id > ?
+                ORDER BY id
+                """,
+                (state["max_id"],),
+            )
+            SQLiteStorage._fold_run_record_rows(state, cursor)
+
+            if total_count != state["count"]:
+                state = {"runs": {}, "max_id": 0, "count": 0}
+                cursor.execute(
+                    "SELECT id, run_id, run_name, timestamp FROM metrics ORDER BY id"
+                )
+                SQLiteStorage._fold_run_record_rows(state, cursor)
+
+            SQLiteStorage._run_records_cache[cache_key] = state
+
+            records = [
+                {"id": run_id, "name": run_name, "created_at": created_at}
+                for (run_id, run_name), created_at in state["runs"].items()
+            ]
+        records.sort(key=lambda r: (r["created_at"] is not None, r["created_at"] or ""))
+        return records
+
     @staticmethod
     def get_run_records(project: str) -> list[dict[str, str | None]]:
         """Every run in `project`, from metrics plus artifact link rows.
@@ -848,6 +949,8 @@ class SQLiteStorage:
                     ).fetchone()
                     is not None
                 )
+                if not has_links and SQLiteStorage._supports_run_ids(conn):
+                    return SQLiteStorage._cached_run_records(conn, str(db_path))
                 if SQLiteStorage._supports_run_ids(conn):
                     sources = [
                         "SELECT run_id, run_name, timestamp AS created_at FROM metrics"
@@ -2437,9 +2540,6 @@ class SQLiteStorage:
         cache_key = _logs_read_cache_key(
             project, run, run_id, max_points, scalar_only=scalar_only
         )
-        cached = _logs_read_cache_get(db_path, cache_key)
-        if cached is not None:
-            return cached
 
         try:
             with SQLiteStorage._get_connection(db_path) as conn:
@@ -2447,6 +2547,10 @@ class SQLiteStorage:
                 run_identity = SQLiteStorage._resolve_run_identity(
                     conn, run_name=run, run_id=run_id
                 )
+                fingerprint = _run_logs_fingerprint(cursor, run_identity)
+                cached = _logs_read_cache_get(cache_key, fingerprint)
+                if cached is not None:
+                    return cached
                 if run_identity is None:
                     logs: list[dict[str, Any]] = []
                 else:
@@ -2458,8 +2562,61 @@ class SQLiteStorage:
                 return []
             raise
 
-        _logs_read_cache_put(db_path, cache_key, logs)
+        _logs_read_cache_put(cache_key, fingerprint, logs)
         return [{**d} for d in logs]
+
+    @staticmethod
+    def get_run_log_versions(
+        project: str, runs: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
+        """Cheap change detectors for each requested run.
+
+        The version string is derived from the run's metric row count and max
+        step, read from the covering index without touching payloads. Clients
+        poll this and refetch logs only for runs whose version changed.
+        """
+        if not runs:
+            return []
+        db_path = SQLiteStorage.get_project_db_path(project)
+        empty_version = "0:-1"
+        if not db_path.exists():
+            return [
+                {
+                    "run": r.get("run"),
+                    "run_id": r.get("run_id"),
+                    "version": empty_version,
+                }
+                for r in runs
+            ]
+
+        out: list[dict[str, Any]] = []
+        try:
+            with SQLiteStorage._get_connection(db_path) as conn:
+                cursor = conn.cursor()
+                for r in runs:
+                    run_identity = SQLiteStorage._resolve_run_identity(
+                        conn, run_name=r.get("run"), run_id=r.get("run_id")
+                    )
+                    count, max_step = _run_logs_fingerprint(cursor, run_identity)
+                    out.append(
+                        {
+                            "run": r.get("run"),
+                            "run_id": r.get("run_id"),
+                            "version": f"{count}:{max_step}",
+                        }
+                    )
+        except sqlite3.OperationalError as e:
+            if "no such table: metrics" in str(e):
+                return [
+                    {
+                        "run": r.get("run"),
+                        "run_id": r.get("run_id"),
+                        "version": empty_version,
+                    }
+                    for r in runs
+                ]
+            raise
+        return out
 
     @staticmethod
     def get_logs_batch(
@@ -2491,7 +2648,11 @@ class SQLiteStorage:
                     cache_key = _logs_read_cache_key(
                         project, run, run_id, max_points, scalar_only=scalar_only
                     )
-                    cached = _logs_read_cache_get(db_path, cache_key)
+                    run_identity = SQLiteStorage._resolve_run_identity(
+                        conn, run_name=run, run_id=run_id
+                    )
+                    fingerprint = _run_logs_fingerprint(cursor, run_identity)
+                    cached = _logs_read_cache_get(cache_key, fingerprint)
                     if cached is not None:
                         out.append(
                             {
@@ -2501,16 +2662,13 @@ class SQLiteStorage:
                             }
                         )
                         continue
-                    run_identity = SQLiteStorage._resolve_run_identity(
-                        conn, run_name=run, run_id=run_id
-                    )
                     if run_identity is None:
                         logs = []
                     else:
                         logs = SQLiteStorage._fetch_metric_logs_with_cursor(
                             cursor, run_identity, max_points, scalar_only=scalar_only
                         )
-                    _logs_read_cache_put(db_path, cache_key, logs)
+                    _logs_read_cache_put(cache_key, fingerprint, logs)
                     out.append(
                         {
                             "run": run,
@@ -3409,6 +3567,7 @@ class SQLiteStorage:
                         cursor, run_identity[0], run_identity[1], run
                     )
                     conn.commit()
+                    SQLiteStorage._invalidate_project_read_caches(project)
                     return True
                 except sqlite3.Error:
                     return False
@@ -3703,6 +3862,7 @@ class SQLiteStorage:
                             pass
 
                     conn.commit()
+                    SQLiteStorage._invalidate_project_read_caches(project)
 
                     SQLiteStorage._move_media_dir(
                         project_media_dir(project) / old_name,
@@ -4135,6 +4295,8 @@ class SQLiteStorage:
                         )
                         source_conn.commit()
 
+                        SQLiteStorage._invalidate_project_read_caches(project)
+                        SQLiteStorage._invalidate_project_read_caches(new_project)
                         return True
 
     @staticmethod

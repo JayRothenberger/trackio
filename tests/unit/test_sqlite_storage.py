@@ -672,3 +672,66 @@ def test_run_metric_summaries_rebuild_after_run_delete(temp_dir):
 
 def test_run_metric_summaries_missing_project(temp_dir):
     assert SQLiteStorage.get_run_metric_summaries("nope") == []
+
+
+def test_get_run_records_incremental_cache(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 1.0}], steps=[0])
+    first = SQLiteStorage.get_run_records("proj1")
+    assert [r["name"] for r in first] == ["run1"]
+
+    SQLiteStorage.bulk_log("proj1", "run2", [{"a": 2.0}], steps=[0])
+    second = SQLiteStorage.get_run_records("proj1")
+    assert [r["name"] for r in second] == ["run1", "run2"]
+
+    SQLiteStorage.delete_run("proj1", "run1")
+    third = SQLiteStorage.get_run_records("proj1")
+    assert [r["name"] for r in third] == ["run2"]
+
+
+def test_get_run_records_sees_rename(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 1.0}], steps=[0])
+    assert [r["name"] for r in SQLiteStorage.get_run_records("proj1")] == ["run1"]
+
+    SQLiteStorage.rename_run("proj1", "run1", "renamed")
+    assert [r["name"] for r in SQLiteStorage.get_run_records("proj1")] == ["renamed"]
+
+
+def test_get_logs_cached_and_invalidated_by_new_rows(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 1.0}], steps=[0])
+    first = SQLiteStorage.get_logs("proj1", "run1")
+    assert SQLiteStorage.get_logs("proj1", "run1") == first
+
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 2.0}], steps=[1])
+    second = SQLiteStorage.get_logs("proj1", "run1")
+    assert len(second) == len(first) + 1
+    assert second[-1]["a"] == 2.0
+
+
+def test_get_logs_batch_cache_returns_fresh_data_after_delete(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 1.0}, {"a": 2.0}], steps=[0, 1])
+    batch = [{"run": "run1", "run_id": None}]
+    first = SQLiteStorage.get_logs_batch("proj1", batch)
+    assert len(first[0]["logs"]) == 2
+
+    SQLiteStorage.delete_run("proj1", "run1")
+    second = SQLiteStorage.get_logs_batch("proj1", batch)
+    assert second[0]["logs"] == []
+
+
+def test_get_run_log_versions(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 1.0}, {"a": 2.0}], steps=[0, 5])
+    versions = SQLiteStorage.get_run_log_versions(
+        "proj1", [{"run": "run1", "run_id": None}, {"run": "ghost", "run_id": None}]
+    )
+    assert versions[0]["version"] == "2:5"
+    assert versions[1]["version"] == "0:-1"
+
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 3.0}], steps=[6])
+    versions = SQLiteStorage.get_run_log_versions(
+        "proj1", [{"run": "run1", "run_id": None}]
+    )
+    assert versions[0]["version"] == "3:6"
+
+    assert SQLiteStorage.get_run_log_versions("missing", [{"run": "x"}]) == [
+        {"run": "x", "run_id": None, "version": "0:-1"}
+    ]

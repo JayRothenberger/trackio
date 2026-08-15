@@ -7,7 +7,8 @@
   import Accordion from "../components/Accordion.svelte";
   import LoadingTrackio from "../components/LoadingTrackio.svelte";
   import RunComparer from "../components/RunComparer.svelte";
-  import { getLogsBatch } from "../lib/api.js";
+  import { getLogsBatch, getRunLogVersions } from "../lib/api.js";
+  import { runsNeedingRefresh } from "../lib/pollVersions.js";
   import {
     getMetricsPollIntervalMs,
     isRateLimitCooldownActive,
@@ -55,6 +56,8 @@
   let dragState = $state({ group: null, index: -1 });
 
   let rawDataCache = new Map();
+  let runLogVersions = new Map();
+  let refreshInFlight = false;
   let refreshTimer = null;
   const MAX_BATCH_RUNS = 64;
 
@@ -215,6 +218,17 @@
     return results;
   }
 
+  async function fetchVersionsForRuns(runs) {
+    const results = [];
+    for (let i = 0; i < runs.length; i += MAX_BATCH_RUNS) {
+      const chunk = runs.slice(i, i + MAX_BATCH_RUNS);
+      const batch = await getRunLogVersions(project, chunk);
+      if (batch == null) return null;
+      results.push(...batch);
+    }
+    return results;
+  }
+
   async function fetchNewRuns() {
     if (!appBootstrapReady) {
       hasLoaded = false;
@@ -258,9 +272,25 @@
     if (!project || selectedRuns.length === 0) return;
     if (isTabHidden()) return;
     if (isRateLimitCooldownActive()) return;
+    if (refreshInFlight) return;
 
+    refreshInFlight = true;
     try {
-      const batch = await fetchLogsForRuns(selectedRuns);
+      let toFetch = selectedRuns;
+      const versionEntries = await fetchVersionsForRuns(selectedRuns);
+      if (versionEntries != null) {
+        const { changed: staleRuns, nextVersions } = runsNeedingRefresh(
+          selectedRuns,
+          versionEntries,
+          runLogVersions,
+          new Set(rawDataCache.keys()),
+        );
+        runLogVersions = nextVersions;
+        toFetch = staleRuns;
+      }
+      if (toFetch.length === 0) return;
+
+      const batch = await fetchLogsForRuns(toFetch);
       let changed = false;
       for (const entry of batch) {
         const runKey = entry.run_id ?? entry.run;
@@ -276,6 +306,8 @@
       }
     } catch (e) {
       console.error("Failed to refresh metric logs:", e);
+    } finally {
+      refreshInFlight = false;
     }
   }
 
