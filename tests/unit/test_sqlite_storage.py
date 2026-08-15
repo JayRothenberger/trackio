@@ -624,3 +624,51 @@ def test_query_project_normalizes_bytes(temp_dir):
 def test_query_project_missing_project(temp_dir):
     with pytest.raises(FileNotFoundError):
         SQLiteStorage.query_project("nonexistent", "SELECT 1")
+
+
+def test_run_metric_summaries_aggregates_last_min_max(temp_dir):
+    SQLiteStorage.bulk_log(
+        "proj1",
+        "run1",
+        [
+            {"acc": 0.5, "loss": 2.0},
+            {"acc": 0.9, "loss": 0.4, "note": "text ignored"},
+            {"acc": 0.7, "loss": 0.8},
+        ],
+        steps=[0, 1, 2],
+    )
+    SQLiteStorage.bulk_log("proj1", "run2", [{"acc": 0.2}], steps=[0])
+
+    summaries = SQLiteStorage.get_run_metric_summaries("proj1")
+
+    by_name = {s["run_name"]: s["metrics"] for s in summaries}
+    assert by_name["run1"]["acc"] == {"min": 0.5, "max": 0.9, "last": 0.7}
+    assert by_name["run1"]["loss"] == {"min": 0.4, "max": 2.0, "last": 0.8}
+    assert "note" not in by_name["run1"]
+    assert by_name["run2"]["acc"] == {"min": 0.2, "max": 0.2, "last": 0.2}
+
+
+def test_run_metric_summaries_incremental_update(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"acc": 0.5}], steps=[0])
+    first = SQLiteStorage.get_run_metric_summaries("proj1")
+    assert first[0]["metrics"]["acc"]["last"] == 0.5
+
+    SQLiteStorage.bulk_log("proj1", "run1", [{"acc": 0.9}, {"acc": 0.6}], steps=[1, 2])
+    second = SQLiteStorage.get_run_metric_summaries("proj1")
+
+    assert second[0]["metrics"]["acc"] == {"min": 0.5, "max": 0.9, "last": 0.6}
+
+
+def test_run_metric_summaries_rebuild_after_run_delete(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"acc": 0.99}], steps=[0])
+    SQLiteStorage.bulk_log("proj1", "run2", [{"acc": 0.1}], steps=[0])
+    assert len(SQLiteStorage.get_run_metric_summaries("proj1")) == 2
+
+    SQLiteStorage.delete_run("proj1", "run1")
+    summaries = SQLiteStorage.get_run_metric_summaries("proj1")
+
+    assert [s["run_name"] for s in summaries] == ["run2"]
+
+
+def test_run_metric_summaries_missing_project(temp_dir):
+    assert SQLiteStorage.get_run_metric_summaries("nope") == []

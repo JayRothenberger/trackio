@@ -128,6 +128,13 @@ export async function getProjectSummary(project) {
   return await callApi("/get_project_summary", { project });
 }
 
+export async function getRunMetricSummaries(project) {
+  if (await isStaticMode()) {
+    return { project, summaries: [], metric_keys: [] };
+  }
+  return await callApi("/get_run_metric_summaries", { project });
+}
+
 export async function getRunSummary(project, run) {
   const params = { project, ...normalizeRun(run) };
   if (await isStaticMode()) return staticApi.getRunSummary(project, run);

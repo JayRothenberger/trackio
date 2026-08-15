@@ -1031,6 +1031,16 @@ def get_project_summary(project: str) -> dict[str, Any]:
     }
 
 
+def get_run_metric_summaries(project: str) -> dict[str, Any]:
+    summaries = SQLiteStorage.get_run_metric_summaries(project)
+    metric_keys = sorted({key for s in summaries for key in s["metrics"]})
+    return {
+        "project": project,
+        "summaries": summaries,
+        "metric_keys": metric_keys,
+    }
+
+
 def get_run_summary(
     project: str, run: str | None = None, run_id: str | None = None
 ) -> dict[str, Any]:
@@ -1414,6 +1424,7 @@ def _api_registry() -> dict[str, Any]:
         "get_metrics_for_run": get_metrics_for_run,
         "get_all_projects": get_all_projects,
         "get_project_summary": get_project_summary,
+        "get_run_metric_summaries": get_run_metric_summaries,
         "get_run_summary": get_run_summary,
         "get_system_metrics_for_run": get_system_metrics_for_run,
         "get_system_logs": get_system_logs,

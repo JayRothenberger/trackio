@@ -5,12 +5,20 @@
     getProjectSummary,
     getRunSummary,
     getRunArtifactCounts,
+    getRunMetricSummaries,
     deleteRun,
     renameRun,
   } from "../lib/api.js";
   import { openRunDetail } from "../lib/router.js";
   import { buildColorMap } from "../lib/stores.js";
   import { filterMetricsByRegex } from "../lib/dataProcessing.js";
+  import {
+    METRIC_AGGS,
+    buildSummaryMap,
+    formatMetricValue,
+    metricValue,
+    sortRuns,
+  } from "../lib/runSort.js";
 
   let {
     project = null,
@@ -29,12 +37,50 @@
   let renamingIndex = $state(-1);
   let renameValue = $state("");
   let renameInput = $state(null);
+  let metricSummaries = $state([]);
+  let metricKeys = $state([]);
+  let selectedMetric = $state("");
+  let sortCol = $state(null);
+  let sortDir = $state("desc");
+
+  let summaryMap = $derived(buildSummaryMap(metricSummaries));
 
   let filteredRuns = $derived.by(() => {
     if (!filterText || !filterText.trim()) return runsData;
     const matches = new Set(filterMetricsByRegex(runsData.map((r) => r.name), filterText));
     return runsData.filter((r) => matches.has(r.name));
   });
+
+  let sortedRuns = $derived(
+    sortRuns(filteredRuns, sortCol, sortDir, summaryMap, selectedMetric),
+  );
+
+  function toggleSort(col) {
+    if (sortCol === col) {
+      if (sortDir === "desc") {
+        sortDir = "asc";
+      } else {
+        sortCol = null;
+        sortDir = "desc";
+      }
+    } else {
+      sortCol = col;
+      sortDir = col === "name" ? "asc" : "desc";
+    }
+  }
+
+  function selectMetric(value) {
+    selectedMetric = value;
+    if (!value && METRIC_AGGS.includes(sortCol)) {
+      sortCol = null;
+      sortDir = "desc";
+    }
+  }
+
+  function sortArrow(col) {
+    if (sortCol !== col) return "";
+    return sortDir === "asc" ? "↑" : "↓";
+  }
 
   let hasArtifacts = $derived(
     runsData.some((r) => r.outputs > 0 || r.inputs > 0),
@@ -81,11 +127,17 @@
     try {
       const summary = await getProjectSummary(project);
       const runRecords = summary.runs || [];
-      const [summaries, artifactCounts] = await Promise.all([
+      const [summaries, artifactCounts, metricSummaryData] = await Promise.all([
         Promise.all(runRecords.map((run) => getRunSummary(project, run))),
         getRunArtifactCounts(project).catch(() => []),
+        getRunMetricSummaries(project).catch(() => null),
       ]);
       if (seq !== loadSeq) return;
+      metricSummaries = metricSummaryData?.summaries ?? [];
+      metricKeys = metricSummaryData?.metric_keys ?? [];
+      if (selectedMetric && !metricKeys.includes(selectedMetric)) {
+        selectMetric("");
+      }
       const countMaps = buildArtifactCountMaps(artifactCounts);
       const nameRecordCounts = new Map();
       for (const r of runRecords) {
@@ -165,25 +217,69 @@
       <p>Refresh this page or wait for the dashboard to poll; new runs appear in the table with step counts.</p>
     </div>
   {:else}
-    {#if filterText}
-      <div class="filter-count-row">
+    <div class="table-toolbar">
+      {#if filterText}
         <span class="filter-count">{filteredRuns.length} of {runsData.length} runs</span>
-      </div>
-    {/if}
+      {/if}
+      {#if metricKeys.length > 0}
+        <label class="metric-picker">
+          <span>Metric columns:</span>
+          <select
+            value={selectedMetric}
+            onchange={(e) => selectMetric(e.target.value)}
+          >
+            <option value="">None</option>
+            {#each metricKeys as key}
+              <option value={key}>{key}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+    </div>
     <table class="runs-table">
       <thead>
         <tr>
           <th>Actions</th>
-          <th>Run Name</th>
-          <th>Steps</th>
-          <th>Last Step</th>
+          <th
+            class="sortable"
+            class:sorted={sortCol === "name"}
+            onclick={() => toggleSort("name")}
+          >
+            Run Name <span class="sort-arrow">{sortArrow("name")}</span>
+          </th>
+          <th
+            class="sortable"
+            class:sorted={sortCol === "numSteps"}
+            onclick={() => toggleSort("numSteps")}
+          >
+            Steps <span class="sort-arrow">{sortArrow("numSteps")}</span>
+          </th>
+          <th
+            class="sortable"
+            class:sorted={sortCol === "lastStep"}
+            onclick={() => toggleSort("lastStep")}
+          >
+            Last Step <span class="sort-arrow">{sortArrow("lastStep")}</span>
+          </th>
+          {#if selectedMetric}
+            {#each METRIC_AGGS as agg}
+              <th
+                class="sortable metric-col"
+                class:sorted={sortCol === agg}
+                title="{agg} of {selectedMetric}"
+                onclick={() => toggleSort(agg)}
+              >
+                {agg} <span class="sort-arrow">{sortArrow(agg)}</span>
+              </th>
+            {/each}
+          {/if}
           {#if hasArtifacts}
             <th>Artifacts</th>
           {/if}
         </tr>
       </thead>
       <tbody>
-        {#each filteredRuns as run, i}
+        {#each sortedRuns as run, i}
           <tr>
             <td class="actions-cell">
               <div class="actions-wrap">
@@ -238,6 +334,15 @@
             </td>
             <td>{run.numSteps}</td>
             <td>{run.lastStep}</td>
+            {#if selectedMetric}
+              {#each METRIC_AGGS as agg}
+                <td class="metric-col">
+                  {formatMetricValue(
+                    metricValue(summaryMap, run, selectedMetric, agg),
+                  )}
+                </td>
+              {/each}
+            {/if}
             {#if hasArtifacts}
               <td>
                 {#if run.outputs > 0 || run.inputs > 0}
@@ -309,12 +414,53 @@
     background: none;
     padding: 0;
   }
-  .filter-count-row {
+  .table-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
     margin-bottom: 12px;
+    min-height: 28px;
   }
   .filter-count {
     font-size: var(--text-sm, 12px);
     color: var(--body-text-color-subdued, #6b7280);
+  }
+  .metric-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    font-size: var(--text-sm, 12px);
+    color: var(--body-text-color-subdued, #6b7280);
+  }
+  .metric-picker select {
+    font: inherit;
+    color: var(--body-text-color, #1f2937);
+    background: var(--background-fill-primary, white);
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-sm, 4px);
+    padding: 3px 6px;
+    max-width: 280px;
+  }
+  .runs-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .runs-table th.sortable:hover {
+    color: var(--body-text-color, #1f2937);
+  }
+  .runs-table th.sorted {
+    color: var(--color-accent, #f97316);
+  }
+  .sort-arrow {
+    display: inline-block;
+    width: 1em;
+  }
+  .runs-table th.metric-col,
+  .runs-table td.metric-col {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   .runs-table {
     width: 100%;

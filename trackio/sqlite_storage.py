@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, local
-from typing import Any
+from typing import Any, ClassVar
 
 try:
     import fcntl
@@ -3041,6 +3041,107 @@ class SQLiteStorage:
             "rows": rows,
             "row_count": len(rows),
         }
+
+    _metric_summary_cache: ClassVar[dict[str, dict[str, Any]]] = {}
+    _metric_summary_lock: ClassVar[Lock] = Lock()
+
+    @staticmethod
+    def _fold_metric_summary_rows(state: dict[str, Any], rows: Iterator) -> None:
+        aggregates = state["aggregates"]
+        for row in rows:
+            run_key = (row["run_id"], row["run_name"])
+            run_metrics = aggregates.setdefault(run_key, {})
+            try:
+                metrics = json_mod.loads(row["metrics"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(metrics, dict):
+                continue
+            step = row["step"] if row["step"] is not None else 0
+            row_id = row["id"]
+            for key, value in metrics.items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                agg = run_metrics.get(key)
+                if agg is None:
+                    run_metrics[key] = [value, value, value, step, row_id]
+                    continue
+                if value < agg[0]:
+                    agg[0] = value
+                if value > agg[1]:
+                    agg[1] = value
+                if step > agg[3] or (step == agg[3] and row_id >= agg[4]):
+                    agg[2] = value
+                    agg[3] = step
+                    agg[4] = row_id
+            state["max_id"] = max(state["max_id"], row_id)
+            state["count"] += 1
+
+    @staticmethod
+    def get_run_metric_summaries(project: str) -> list[dict[str, Any]]:
+        """Aggregate last/min/max of every numeric metric for each run.
+
+        Aggregates are cached per project and updated incrementally, folding
+        in only the metric rows appended since the previous call. A full
+        rebuild happens on first access and whenever rows were deleted.
+        """
+        db_path = SQLiteStorage.get_project_db_path(project)
+        if not db_path.exists():
+            return []
+
+        cache_key = str(db_path)
+        with SQLiteStorage._metric_summary_lock:
+            state = SQLiteStorage._metric_summary_cache.get(cache_key)
+            try:
+                with SQLiteStorage._get_connection(db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM metrics")
+                    total_count = cursor.fetchone()[0]
+
+                    if state is not None and total_count < state["count"]:
+                        state = None
+                    if state is None:
+                        state = {"aggregates": {}, "max_id": 0, "count": 0}
+
+                    cursor.execute(
+                        """
+                        SELECT id, run_id, run_name, step, metrics
+                        FROM metrics
+                        WHERE id > ?
+                        ORDER BY id
+                        """,
+                        (state["max_id"],),
+                    )
+                    SQLiteStorage._fold_metric_summary_rows(state, cursor)
+
+                    if total_count != state["count"]:
+                        state = {"aggregates": {}, "max_id": 0, "count": 0}
+                        cursor.execute(
+                            """
+                            SELECT id, run_id, run_name, step, metrics
+                            FROM metrics
+                            ORDER BY id
+                            """
+                        )
+                        SQLiteStorage._fold_metric_summary_rows(state, cursor)
+
+                    SQLiteStorage._metric_summary_cache[cache_key] = state
+            except sqlite3.OperationalError as e:
+                if "no such table: metrics" in str(e):
+                    return []
+                raise
+
+            return [
+                {
+                    "run_id": run_id,
+                    "run_name": run_name,
+                    "metrics": {
+                        key: {"min": agg[0], "max": agg[1], "last": agg[2]}
+                        for key, agg in run_metrics.items()
+                    },
+                }
+                for (run_id, run_name), run_metrics in state["aggregates"].items()
+            ]
 
     @staticmethod
     def get_max_steps_for_runs(project: str) -> dict[str, int]:
