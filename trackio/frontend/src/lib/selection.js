@@ -3,6 +3,8 @@ export function latestOnlySelection(filteredRunIds) {
   return [filteredRunIds[0]];
 }
 
+export const DEFAULT_SELECTED_RUNS = 8;
+
 export function reconcileSelectedRuns(prevSelected, newOrderedIds, prevOrderedIds) {
   const prev = prevSelected ?? [];
   const ordered = newOrderedIds ?? [];
@@ -11,7 +13,7 @@ export function reconcileSelectedRuns(prevSelected, newOrderedIds, prevOrderedId
   const kept = prev.filter((r) => newIdSet.has(r));
 
   if (prev.length === 0 || kept.length === 0) {
-    return [...ordered];
+    return ordered.slice(0, DEFAULT_SELECTED_RUNS);
   }
 
   const allPrevSelected =

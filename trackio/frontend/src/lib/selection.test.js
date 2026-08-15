@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { latestOnlySelection, reconcileSelectedRuns } from "./selection.js";
+import {
+  DEFAULT_SELECTED_RUNS,
+  latestOnlySelection,
+  reconcileSelectedRuns,
+} from "./selection.js";
 
 describe("latestOnlySelection", () => {
   test("returns an empty array when there are no runs", () => {
@@ -18,8 +22,12 @@ describe("latestOnlySelection", () => {
 });
 
 describe("reconcileSelectedRuns", () => {
-  test("selects all runs when the previous selection was empty (fresh load)", () => {
+  test("selects the most recent runs when the previous selection was empty (fresh load)", () => {
     expect(reconcileSelectedRuns([], ["a", "b", "c"])).toEqual(["a", "b", "c"]);
+    const many = Array.from({ length: 20 }, (_, i) => `run-${i}`);
+    expect(reconcileSelectedRuns([], many)).toEqual(
+      many.slice(0, DEFAULT_SELECTED_RUNS),
+    );
   });
 
   test("keeps a partial selection without auto-selecting new runs", () => {
