@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import Navbar from "./components/Navbar.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import AlertPanel from "./components/AlertPanel.svelte";
@@ -103,6 +103,7 @@
   });
   let mutationPollTimer = $state(null);
   let appBootstrapReady = $state(false);
+  let runsLoading = $state(true);
   let logoUrls = $state(DEFAULT_LOGO_URLS);
   let plotOrder = $state([]);
   let tableTruncateLength = $state(250);
@@ -222,22 +223,21 @@
       selectedSystemDevices = [];
       runConfigs = {};
       runConfigsProject = null;
+      runsLoading = false;
       return;
     }
-    if (project !== runConfigsProject) {
+    const isProjectSwitch = project !== runConfigsProject;
+    if (isProjectSwitch) {
       runConfigs = {};
     }
     try {
+      const configsPromise = isProjectSwitch
+        ? getRunConfigs(project).catch(() => null)
+        : null;
       const data = await getRunsForProject(project);
       if (selectedProject !== project) return;
       const newRuns = [...(data || [])].reverse();
       const runsChanged = JSON.stringify(runs) !== JSON.stringify(newRuns);
-
-      let configs = null;
-      if (runsChanged || project !== runConfigsProject) {
-        configs = await getRunConfigs(project).catch(() => null);
-        if (selectedProject !== project) return;
-      }
 
       if (runsChanged) {
         const prevSelected = selectedRuns;
@@ -249,12 +249,25 @@
           prevOrdered,
         );
       }
+      runsLoading = false;
+
+      let configs = null;
+      if (configsPromise) {
+        configs = await configsPromise;
+        if (selectedProject !== project) return;
+      } else if (runsChanged) {
+        configs = await getRunConfigs(project).catch(() => null);
+        if (selectedProject !== project) return;
+      }
       if (configs != null) {
         runConfigs = configs;
         runConfigsProject = project;
       }
     } catch (e) {
       console.error("Failed to load runs:", e);
+      if (selectedProject === project) {
+        runsLoading = false;
+      }
     }
   }
 
@@ -358,7 +371,8 @@
     selectedProject;
     availableSystemDevices = [];
     selectedSystemDevices = [];
-    refreshRuns();
+    runsLoading = true;
+    untrack(() => refreshRuns());
   });
 
   $effect(() => {
@@ -637,6 +651,7 @@
           {showHeaders}
           {showComparer}
           {appBootstrapReady}
+          {runsLoading}
           {plotOrder}
           {realtimeEnabled}
           bind:metricColumns

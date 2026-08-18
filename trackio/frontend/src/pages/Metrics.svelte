@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { getQueryParam } from "../lib/router.js";
   import LinePlot from "../components/LinePlot.svelte";
   import BarPlot from "../components/BarPlot.svelte";
@@ -9,6 +9,7 @@
   import RunComparer from "../components/RunComparer.svelte";
   import { getLogsBatch, getRunLogVersions } from "../lib/api.js";
   import { runsNeedingRefresh } from "../lib/pollVersions.js";
+  import { metricsFetchGate } from "../lib/fetchGate.js";
   import {
     getMetricsPollIntervalMs,
     isRateLimitCooldownActive,
@@ -38,6 +39,7 @@
     showHeaders = true,
     showComparer = false,
     appBootstrapReady = false,
+    runsLoading = false,
     plotOrder = [],
     realtimeEnabled = true,
     // eslint-disable-next-line no-useless-assignment -- bindable out-prop to parent
@@ -59,6 +61,7 @@
   let runLogVersions = new Map();
   let refreshInFlight = false;
   let refreshTimer = null;
+  let lastProject = project;
   const MAX_BATCH_RUNS = 64;
 
   let colorMap = $derived(buildColorMap(allRuns));
@@ -269,6 +272,7 @@
 
   async function refreshCachedRuns() {
     if (!realtimeEnabled) return;
+    if (runsLoading) return;
     if (!project || selectedRuns.length === 0) return;
     if (isTabHidden()) return;
     if (isRateLimitCooldownActive()) return;
@@ -315,8 +319,21 @@
     project;
     selectedRuns;
     appBootstrapReady;
-    rawDataCache = project ? rawDataCache : new Map();
-    fetchNewRuns();
+    runsLoading;
+    const { shouldReset, shouldFetch } = metricsFetchGate({
+      project,
+      lastProject,
+      runsLoading,
+    });
+    if (shouldReset) {
+      lastProject = project;
+      hasLoaded = false;
+      rawDataCache = new Map();
+      runLogVersions = new Map();
+    }
+    if (shouldFetch) {
+      untrack(() => fetchNewRuns());
+    }
   });
 
   $effect(() => {
@@ -361,7 +378,7 @@
 </script>
 
 <div class="metrics-page">
-  {#if !appBootstrapReady || !hasLoaded}
+  {#if !appBootstrapReady || !hasLoaded || runsLoading}
     <LoadingTrackio />
   {:else if !project}
     <div class="empty-state">
