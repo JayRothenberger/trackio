@@ -23,7 +23,7 @@
   }
 
   function isOptionalEmpty(id) {
-    return optionalEmptyTabs.has(id) && tabAvailability[id] === false;
+    return optionalEmptyTabs.has(id) && tabAvailability[id] !== true;
   }
 
   function isActive(id) {

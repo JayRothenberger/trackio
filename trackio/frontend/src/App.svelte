@@ -172,6 +172,16 @@
     navigateTo(page);
   }
 
+  $effect(() => {
+    if (!hideEmptyTabs) return;
+    if (!OPTIONAL_EMPTY_TABS.has(currentPage)) return;
+    if (tabAvailability[currentPage] !== false) return;
+    const fallback =
+      AUTO_OPEN_TAB_ORDER.find((page) => tabAvailability[page]) ?? "metrics";
+    currentPage = fallback;
+    navigateTo(fallback);
+  });
+
   function isBareDashboardPath() {
     const base = window.__trackio_base || "";
     let pathname = window.location.pathname;
@@ -436,7 +446,7 @@
       showHeaders = false;
     }
 
-    hideEmptyTabs = getQueryParam("hide_empty_tabs") === "true";
+    hideEmptyTabs = getQueryParam("hide_empty_tabs") !== "false";
 
     shouldOpenFirstNonEmptyTab = isBareDashboardPath();
     currentPage = getPageFromPath();

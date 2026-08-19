@@ -735,3 +735,36 @@ def test_get_run_log_versions(temp_dir):
     assert SQLiteStorage.get_run_log_versions("missing", [{"run": "x"}]) == [
         {"run": "x", "run_id": None, "version": "0:-1"}
     ]
+
+
+def test_tab_availability_flags_incremental(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 1.0}], steps=[0])
+    flags = SQLiteStorage.get_tab_availability_flags("proj1")
+    assert flags["metrics"] is True
+    assert flags["media"] is False
+
+    SQLiteStorage.log(
+        project="proj1",
+        run="run1",
+        metrics={"img": {"_type": "trackio.image", "file_path": "x.png"}},
+    )
+    flags = SQLiteStorage.get_tab_availability_flags("proj1")
+    assert flags["media"] is True
+
+    flags = SQLiteStorage.get_tab_availability_flags("proj1")
+    assert flags["media"] is True and flags["metrics"] is True
+
+
+def test_tab_availability_flags_reset_on_delete(temp_dir):
+    SQLiteStorage.log(
+        project="proj1",
+        run="run1",
+        metrics={"img": {"_type": "trackio.image", "file_path": "x.png"}},
+    )
+    SQLiteStorage.bulk_log("proj1", "run2", [{"a": 1.0}], steps=[0])
+    assert SQLiteStorage.get_tab_availability_flags("proj1")["media"] is True
+
+    SQLiteStorage.delete_run("proj1", "run1")
+    flags = SQLiteStorage.get_tab_availability_flags("proj1")
+    assert flags["media"] is False
+    assert flags["metrics"] is True

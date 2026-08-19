@@ -860,6 +860,8 @@ class SQLiteStorage:
             SQLiteStorage._run_records_cache.pop(db_key, None)
         with SQLiteStorage._metric_summary_lock:
             SQLiteStorage._metric_summary_cache.pop(db_key, None)
+        with SQLiteStorage._tab_flags_lock:
+            SQLiteStorage._tab_flags_cache.pop(db_key, None)
         with _LOGS_READ_CACHE_LOCK:
             for key in [k for k in _LOGS_READ_CACHE if k[0] == project]:
                 del _LOGS_READ_CACHE[key]
@@ -2284,6 +2286,85 @@ class SQLiteStorage:
                 return None
             raise
 
+    _METRICS_FLAG_PREDICATES: ClassVar[dict[str, tuple[str, tuple]]] = {
+        "metrics": (
+            "(CAST(metrics AS TEXT) GLOB '*:[0-9]*' "
+            "OR CAST(metrics AS TEXT) GLOB '*:-[0-9]*' "
+            "OR CAST(metrics AS TEXT) GLOB ?)",
+            ('*"_type":"trackio.histogram"*',),
+        ),
+        "media": (
+            "(CAST(metrics AS TEXT) GLOB ? "
+            "OR CAST(metrics AS TEXT) GLOB ? "
+            "OR CAST(metrics AS TEXT) GLOB ? "
+            "OR CAST(metrics AS TEXT) GLOB ? "
+            "OR CAST(metrics AS TEXT) GLOB ?)",
+            (
+                '*"_type":"trackio.image"*',
+                '*"_type":"trackio.video"*',
+                '*"_type":"trackio.audio"*',
+                '*"_type":"trackio.table"*',
+                '*"_type":"trackio.html"*',
+            ),
+        ),
+        "reports": (
+            "CAST(metrics AS TEXT) GLOB ?",
+            ('*"_type":"trackio.markdown"*',),
+        ),
+    }
+
+    _tab_flags_cache: ClassVar[dict[str, dict[str, Any]]] = {}
+    _tab_flags_lock: ClassVar[Lock] = Lock()
+
+    @staticmethod
+    def _metrics_content_flags(conn: sqlite3.Connection, cache_key: str) -> dict:
+        """Content-derived flags (metrics/media/reports), scanned incrementally.
+
+        The GLOB probes are cheap when a flag is true (first match wins) but
+        scan the whole table when false, so false flags are re-checked only
+        against rows appended since the previous call. Deletions trigger a
+        full rescan; flags never flip back to false from appends alone.
+        """
+        cursor = conn.cursor()
+        with SQLiteStorage._tab_flags_lock:
+            state = SQLiteStorage._tab_flags_cache.get(cache_key)
+            cursor.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM metrics")
+            total_count, max_id = cursor.fetchone()
+
+            if state is not None:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM metrics WHERE id > ?",
+                    (state["max_id"],),
+                )
+                new_rows = cursor.fetchone()[0]
+                if total_count != state["count"] + new_rows:
+                    state = None
+            if state is None:
+                state = {
+                    "flags": dict.fromkeys(
+                        SQLiteStorage._METRICS_FLAG_PREDICATES, False
+                    ),
+                    "max_id": 0,
+                    "count": 0,
+                }
+
+            for name, (
+                predicate,
+                params,
+            ) in SQLiteStorage._METRICS_FLAG_PREDICATES.items():
+                if state["flags"][name]:
+                    continue
+                cursor.execute(
+                    f"SELECT 1 FROM metrics WHERE id > ? AND {predicate} LIMIT 1",
+                    (state["max_id"], *params),
+                )
+                state["flags"][name] = cursor.fetchone() is not None
+
+            state["max_id"] = max_id
+            state["count"] = total_count
+            SQLiteStorage._tab_flags_cache[cache_key] = state
+            return dict(state["flags"])
+
     @staticmethod
     def get_tab_availability_flags(project: str) -> dict[str, bool]:
         SQLiteStorage._ensure_hub_loaded()
@@ -2309,37 +2390,10 @@ class SQLiteStorage:
                 return False
 
         with SQLiteStorage._get_connection(db_path) as conn:
-            flags["metrics"] = _exists(
-                conn,
-                "SELECT 1 FROM metrics "
-                "WHERE CAST(metrics AS TEXT) GLOB '*:[0-9]*' "
-                "OR CAST(metrics AS TEXT) GLOB '*:-[0-9]*' "
-                "OR CAST(metrics AS TEXT) GLOB ? "
-                "LIMIT 1",
-                ('*"_type":"trackio.histogram"*',),
-            )
-            flags["media"] = _exists(
-                conn,
-                "SELECT 1 FROM metrics WHERE "
-                "CAST(metrics AS TEXT) GLOB ? "
-                "OR CAST(metrics AS TEXT) GLOB ? "
-                "OR CAST(metrics AS TEXT) GLOB ? "
-                "OR CAST(metrics AS TEXT) GLOB ? "
-                "OR CAST(metrics AS TEXT) GLOB ? "
-                "LIMIT 1",
-                (
-                    '*"_type":"trackio.image"*',
-                    '*"_type":"trackio.video"*',
-                    '*"_type":"trackio.audio"*',
-                    '*"_type":"trackio.table"*',
-                    '*"_type":"trackio.html"*',
-                ),
-            )
-            flags["reports"] = _exists(
-                conn,
-                "SELECT 1 FROM metrics WHERE CAST(metrics AS TEXT) GLOB ? LIMIT 1",
-                ('*"_type":"trackio.markdown"*',),
-            )
+            try:
+                flags.update(SQLiteStorage._metrics_content_flags(conn, str(db_path)))
+            except sqlite3.OperationalError:
+                pass
             flags["system"] = _exists(conn, "SELECT 1 FROM system_metrics LIMIT 1")
             flags["traces"] = _exists(conn, "SELECT 1 FROM traces LIMIT 1")
             flags["alerts"] = _exists(conn, "SELECT 1 FROM alerts LIMIT 1")
