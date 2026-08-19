@@ -1,7 +1,7 @@
 <script>
   import LoadingTrackio from "../components/LoadingTrackio.svelte";
   import WaveformAudio from "../components/WaveformAudio.svelte";
-  import { getLogs, getMediaUrl } from "../lib/api.js";
+  import { getLogsBatch, getMediaUrl } from "../lib/api.js";
   import { filterMetricsByRegex } from "../lib/dataProcessing.js";
   import { buildColorMap } from "../lib/stores.js";
 
@@ -10,6 +10,7 @@
     selectedRuns = [],
     allRuns = [],
     tableTruncateLength = 250,
+    runsLoading = false,
   } = $props();
 
   let runColorMap = $derived(
@@ -121,7 +122,11 @@
     resetVisibleCounts();
   });
 
+  let loadSeq = 0;
+  const MAX_BATCH_RUNS = 64;
+
   async function loadMedia() {
+    const seq = ++loadSeq;
     if (!project || selectedRuns.length === 0) {
       rawMediaItems = EMPTY_MEDIA_ITEMS;
       return;
@@ -131,16 +136,20 @@
     try {
       const runsToLoad = selectedRuns;
       const allLogs = [];
-      for (const run of runsToLoad) {
-        const logs = await getLogs(project, run);
-        if (logs)
+      for (let i = 0; i < runsToLoad.length; i += MAX_BATCH_RUNS) {
+        const chunk = runsToLoad.slice(i, i + MAX_BATCH_RUNS);
+        const batch = await getLogsBatch(project, chunk);
+        if (seq !== loadSeq) return;
+        for (const entry of batch) {
+          if (!entry.logs) continue;
           allLogs.push(
-            ...logs.map((l) => ({
+            ...entry.logs.map((l) => ({
               ...l,
-              _run: run.name,
-              _runId: run.id ?? run.name,
+              _run: entry.run,
+              _runId: entry.run_id ?? entry.run,
             })),
           );
+        }
       }
       const logs = allLogs;
       const images = [];
@@ -186,15 +195,17 @@
 
       rawMediaItems = { images, videos, audios, tables, htmls };
     } catch (e) {
-      console.error("Failed to load media:", e);
+      if (seq === loadSeq) console.error("Failed to load media:", e);
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
   $effect(() => {
     project;
     selectedRuns;
+    runsLoading;
+    if (runsLoading) return;
     loadMedia();
   });
 
@@ -281,7 +292,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="media-page">
-  {#if loading}
+  {#if loading || runsLoading}
     <LoadingTrackio />
   {:else if !hasMedia}
     <div class="empty-state">

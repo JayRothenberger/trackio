@@ -1,9 +1,10 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import LinePlot from "../components/LinePlot.svelte";
   import Accordion from "../components/Accordion.svelte";
   import LoadingTrackio from "../components/LoadingTrackio.svelte";
   import { getSystemLogs, getSystemLogsBatch } from "../lib/api.js";
+  import { metricsFetchGate } from "../lib/fetchGate.js";
   import {
     getMetricsPollIntervalMs,
     isRateLimitCooldownActive,
@@ -23,6 +24,7 @@
     allRuns = [],
     smoothing = 5,
     appBootstrapReady = false,
+    runsLoading = false,
     realtimeEnabled = true,
     availableDevices = $bindable([]),
     selectedDevices = $bindable([]),
@@ -39,6 +41,8 @@
   const MAX_BATCH_RUNS = 64;
 
   let rawDataCache = new Map();
+  let lastProject = project;
+  let refreshInFlight = false;
   let refreshTimer = null;
 
   let runColorMap = $derived(buildColorMap(allRuns.length ? allRuns : selectedRuns));
@@ -262,10 +266,13 @@
 
   async function refreshCachedRuns() {
     if (!realtimeEnabled) return;
+    if (runsLoading) return;
     if (!project || selectedRuns.length === 0) return;
     if (isTabHidden()) return;
     if (isRateLimitCooldownActive()) return;
+    if (refreshInFlight) return;
 
+    refreshInFlight = true;
     try {
       const batch = await fetchSystemLogsForRuns(selectedRuns);
       let changed = false;
@@ -283,6 +290,8 @@
       }
     } catch (e) {
       console.error("Failed to refresh system metric logs:", e);
+    } finally {
+      refreshInFlight = false;
     }
   }
 
@@ -290,8 +299,20 @@
     project;
     selectedRuns;
     appBootstrapReady;
-    rawDataCache = project ? rawDataCache : new Map();
-    fetchNewRuns();
+    runsLoading;
+    const { shouldReset, shouldFetch } = metricsFetchGate({
+      project,
+      lastProject,
+      runsLoading,
+    });
+    if (shouldReset) {
+      lastProject = project;
+      hasLoaded = false;
+      rawDataCache = new Map();
+    }
+    if (shouldFetch) {
+      untrack(() => fetchNewRuns());
+    }
   });
 
   $effect(() => {
@@ -486,7 +507,7 @@
 </script>
 
 <div class="system-page">
-  {#if !appBootstrapReady || (!hasLoaded && !loadError)}
+  {#if !appBootstrapReady || runsLoading || (!hasLoaded && !loadError)}
     <LoadingTrackio />
   {:else if loadError && !hasLoaded}
     <div class="empty-state">

@@ -668,6 +668,7 @@
           allRuns={runs}
           {smoothing}
           {appBootstrapReady}
+          {runsLoading}
           {realtimeEnabled}
           bind:availableDevices={availableSystemDevices}
           bind:selectedDevices={selectedSystemDevices}
@@ -678,6 +679,7 @@
           selectedRuns={selectedRunRecords}
           allRuns={runs}
           {tableTruncateLength}
+          {runsLoading}
         />
       {:else if currentPage === "reports"}
         <Reports project={selectedProject} selectedRuns={selectedRunRecords} />
