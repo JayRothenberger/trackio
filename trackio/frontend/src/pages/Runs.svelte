@@ -3,6 +3,7 @@
   import LoadingTrackio from "../components/LoadingTrackio.svelte";
   import {
     getProjectSummary,
+    getProjectRunStats,
     getRunSummary,
     getRunArtifactCounts,
     getRunMetricSummaries,
@@ -34,6 +35,7 @@
 
   let runsData = $state([]);
   let loading = $state(false);
+  let loadError = $state(null);
   let renamingIndex = $state(-1);
   let renameValue = $state("");
   let renameInput = $state(null);
@@ -127,8 +129,8 @@
     try {
       const summary = await getProjectSummary(project);
       const runRecords = summary.runs || [];
-      const [summaries, artifactCounts, metricSummaryData] = await Promise.all([
-        Promise.all(runRecords.map((run) => getRunSummary(project, run))),
+      const [statsData, artifactCounts, metricSummaryData] = await Promise.all([
+        getProjectRunStats(project).catch(() => null),
         getRunArtifactCounts(project).catch(() => []),
         getRunMetricSummaries(project).catch(() => null),
       ]);
@@ -138,20 +140,45 @@
       if (selectedMetric && !metricKeys.includes(selectedMetric)) {
         selectMetric("");
       }
+
+      const statsMap = new Map();
+      if (statsData?.stats) {
+        for (const s of statsData.stats) {
+          statsMap.set(s.run_id ?? s.run_name, s);
+        }
+      } else {
+        const summaries = await Promise.all(
+          runRecords.map((run) =>
+            getRunSummary(project, run).catch(() => null),
+          ),
+        );
+        if (seq !== loadSeq) return;
+        summaries.forEach((s, i) => {
+          if (s) statsMap.set(runRecords[i].id ?? runRecords[i].name, s);
+        });
+      }
+
       const countMaps = buildArtifactCountMaps(artifactCounts);
       const nameRecordCounts = new Map();
       for (const r of runRecords) {
         nameRecordCounts.set(r.name, (nameRecordCounts.get(r.name) ?? 0) + 1);
       }
-      runsData = summaries.map((s, i) => ({
-        id: runRecords[i].id,
-        name: runRecords[i].name,
-        numSteps: s.num_logs || 0,
-        lastStep: s.last_step || 0,
-        ...artifactCountsFor(countMaps, runRecords[i], nameRecordCounts),
-      }));
+      runsData = runRecords.map((rec) => {
+        const s = statsMap.get(rec.id ?? rec.name);
+        return {
+          id: rec.id,
+          name: rec.name,
+          numSteps: s?.num_logs || 0,
+          lastStep: s?.last_step || 0,
+          ...artifactCountsFor(countMaps, rec, nameRecordCounts),
+        };
+      });
+      loadError = null;
     } catch (e) {
-      if (seq === loadSeq) console.error("Failed to load runs:", e);
+      if (seq === loadSeq) {
+        console.error("Failed to load runs:", e);
+        loadError = e?.message || "Failed to load runs";
+      }
     } finally {
       if (seq === loadSeq) loading = false;
     }
@@ -209,6 +236,12 @@
 <div class="runs-page">
   {#if loading}
     <LoadingTrackio />
+  {:else if loadError && runsData.length === 0}
+    <div class="empty-state">
+      <h2>Failed to load runs</h2>
+      <p>{loadError}</p>
+      <p><button class="link-btn" onclick={() => loadRuns()}>Retry</button></p>
+    </div>
   {:else if runsData.length === 0}
     <div class="empty-state">
       <h2>No runs in this project</h2>

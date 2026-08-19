@@ -847,6 +847,8 @@ class SQLiteStorage:
 
     _run_records_cache: ClassVar[dict[str, dict[str, Any]]] = {}
     _run_records_lock: ClassVar[Lock] = Lock()
+    _run_stats_cache: ClassVar[dict[str, dict[str, Any]]] = {}
+    _run_stats_lock: ClassVar[Lock] = Lock()
 
     @staticmethod
     def _invalidate_project_read_caches(project: str) -> None:
@@ -858,6 +860,8 @@ class SQLiteStorage:
         db_key = str(SQLiteStorage.get_project_db_path(project))
         with SQLiteStorage._run_records_lock:
             SQLiteStorage._run_records_cache.pop(db_key, None)
+        with SQLiteStorage._run_stats_lock:
+            SQLiteStorage._run_stats_cache.pop(db_key, None)
         with SQLiteStorage._metric_summary_lock:
             SQLiteStorage._metric_summary_cache.pop(db_key, None)
         with SQLiteStorage._tab_flags_lock:
@@ -865,6 +869,82 @@ class SQLiteStorage:
         with _LOGS_READ_CACHE_LOCK:
             for key in [k for k in _LOGS_READ_CACHE if k[0] == project]:
                 del _LOGS_READ_CACHE[key]
+
+    @staticmethod
+    def _fold_run_stat_rows(state: dict[str, Any], rows: Iterator) -> None:
+        stats = state["stats"]
+        for row in rows:
+            run_key = (row["run_id"], row["run_name"])
+            step = row["step"] if row["step"] is not None else 0
+            entry = stats.get(run_key)
+            if entry is None:
+                stats[run_key] = [1, step]
+            else:
+                entry[0] += 1
+                if step > entry[1]:
+                    entry[1] = step
+            state["max_id"] = max(state["max_id"], row["id"])
+            state["count"] += 1
+
+    @staticmethod
+    def get_project_run_stats(project: str) -> list[dict[str, Any]]:
+        """Per-run metric row counts and last steps for a whole project.
+
+        Incrementally maintained like the run-records cache: only rows
+        appended since the previous call are folded in, deletions force a
+        full rebuild, and run mutations invalidate via
+        _invalidate_project_read_caches.
+        """
+        db_path = SQLiteStorage.get_project_db_path(project)
+        if not db_path.exists():
+            return []
+
+        cache_key = str(db_path)
+        try:
+            with SQLiteStorage._get_connection(db_path) as conn:
+                cursor = conn.cursor()
+                with SQLiteStorage._run_stats_lock:
+                    state = SQLiteStorage._run_stats_cache.get(cache_key)
+                    cursor.execute("SELECT COUNT(*) FROM metrics")
+                    total_count = cursor.fetchone()[0]
+
+                    if state is not None and total_count < state["count"]:
+                        state = None
+                    if state is None:
+                        state = {"stats": {}, "max_id": 0, "count": 0}
+
+                    cursor.execute(
+                        """
+                        SELECT id, run_id, run_name, step
+                        FROM metrics
+                        WHERE id > ?
+                        ORDER BY id
+                        """,
+                        (state["max_id"],),
+                    )
+                    SQLiteStorage._fold_run_stat_rows(state, cursor)
+
+                    if total_count != state["count"]:
+                        state = {"stats": {}, "max_id": 0, "count": 0}
+                        cursor.execute(
+                            "SELECT id, run_id, run_name, step FROM metrics ORDER BY id"
+                        )
+                        SQLiteStorage._fold_run_stat_rows(state, cursor)
+
+                    SQLiteStorage._run_stats_cache[cache_key] = state
+                    return [
+                        {
+                            "run_id": run_id,
+                            "run_name": run_name,
+                            "num_logs": entry[0],
+                            "last_step": entry[1],
+                        }
+                        for (run_id, run_name), entry in state["stats"].items()
+                    ]
+        except sqlite3.OperationalError as e:
+            if "no such table: metrics" in str(e):
+                return []
+            raise
 
     @staticmethod
     def _fold_run_record_rows(state: dict[str, Any], rows: Iterator) -> None:

@@ -768,3 +768,21 @@ def test_tab_availability_flags_reset_on_delete(temp_dir):
     flags = SQLiteStorage.get_tab_availability_flags("proj1")
     assert flags["media"] is False
     assert flags["metrics"] is True
+
+
+def test_project_run_stats_incremental(temp_dir):
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 1.0}, {"a": 2.0}], steps=[0, 7])
+    SQLiteStorage.bulk_log("proj1", "run2", [{"a": 3.0}], steps=[0])
+    stats = {s["run_name"]: s for s in SQLiteStorage.get_project_run_stats("proj1")}
+    assert stats["run1"]["num_logs"] == 2 and stats["run1"]["last_step"] == 7
+    assert stats["run2"]["num_logs"] == 1 and stats["run2"]["last_step"] == 0
+
+    SQLiteStorage.bulk_log("proj1", "run1", [{"a": 4.0}], steps=[9])
+    stats = {s["run_name"]: s for s in SQLiteStorage.get_project_run_stats("proj1")}
+    assert stats["run1"]["num_logs"] == 3 and stats["run1"]["last_step"] == 9
+
+    SQLiteStorage.delete_run("proj1", "run1")
+    stats = {s["run_name"]: s for s in SQLiteStorage.get_project_run_stats("proj1")}
+    assert list(stats) == ["run2"]
+
+    assert SQLiteStorage.get_project_run_stats("missing") == []

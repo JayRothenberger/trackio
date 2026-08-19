@@ -144,6 +144,11 @@ export async function getRunMetricSummaries(project) {
   return await callApi("/get_run_metric_summaries", { project });
 }
 
+export async function getProjectRunStats(project) {
+  if (await isStaticMode()) return null;
+  return await callApi("/get_project_run_stats", { project });
+}
+
 export async function getRunSummary(project, run) {
   const params = { project, ...normalizeRun(run) };
   if (await isStaticMode()) return staticApi.getRunSummary(project, run);
