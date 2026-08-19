@@ -13,10 +13,13 @@
   import { openRunDetail } from "../lib/router.js";
   import { buildColorMap } from "../lib/stores.js";
   import { filterMetricsByRegex } from "../lib/dataProcessing.js";
+  import { clickOutside } from "../lib/actions.js";
   import {
     METRIC_AGGS,
+    METRIC_COL_PREFIX,
     buildSummaryMap,
     formatMetricValue,
+    metricSortKey,
     metricValue,
     sortRuns,
   } from "../lib/runSort.js";
@@ -41,11 +44,25 @@
   let renameInput = $state(null);
   let metricSummaries = $state([]);
   let metricKeys = $state([]);
-  let selectedMetric = $state("");
+  let selectedMetrics = $state([]);
+  let metricAggs = $state({});
+  let columnsMenuOpen = $state(false);
+  let columnsFilter = $state("");
+  let openAggMenuKey = $state(null);
   let sortCol = $state(null);
   let sortDir = $state("desc");
 
   let summaryMap = $derived(buildSummaryMap(metricSummaries));
+
+  let displayedMetrics = $derived(
+    metricKeys.filter((key) => selectedMetrics.includes(key)),
+  );
+
+  let filteredMetricKeys = $derived(
+    columnsFilter.trim()
+      ? filterMetricsByRegex(metricKeys, columnsFilter)
+      : metricKeys,
+  );
 
   let filteredRuns = $derived.by(() => {
     if (!filterText || !filterText.trim()) return runsData;
@@ -54,7 +71,7 @@
   });
 
   let sortedRuns = $derived(
-    sortRuns(filteredRuns, sortCol, sortDir, summaryMap, selectedMetric),
+    sortRuns(filteredRuns, sortCol, sortDir, summaryMap, metricAggs),
   );
 
   function toggleSort(col) {
@@ -71,12 +88,30 @@
     }
   }
 
-  function selectMetric(value) {
-    selectedMetric = value;
-    if (!value && METRIC_AGGS.includes(sortCol)) {
-      sortCol = null;
-      sortDir = "desc";
+  function toggleMetricColumn(key) {
+    if (selectedMetrics.includes(key)) {
+      selectedMetrics = selectedMetrics.filter((k) => k !== key);
+      if (sortCol === METRIC_COL_PREFIX + key) {
+        sortCol = null;
+        sortDir = "desc";
+      }
+    } else {
+      selectedMetrics = [...selectedMetrics, key];
     }
+  }
+
+  function aggFor(key) {
+    return metricAggs[key] ?? "last";
+  }
+
+  function setAgg(key, agg) {
+    metricAggs[key] = agg;
+    openAggMenuKey = null;
+  }
+
+  function closeMenus() {
+    columnsMenuOpen = false;
+    openAggMenuKey = null;
   }
 
   function sortArrow(col) {
@@ -137,8 +172,13 @@
       if (seq !== loadSeq) return;
       metricSummaries = metricSummaryData?.summaries ?? [];
       metricKeys = metricSummaryData?.metric_keys ?? [];
-      if (selectedMetric && !metricKeys.includes(selectedMetric)) {
-        selectMetric("");
+      selectedMetrics = selectedMetrics.filter((key) =>
+        metricKeys.includes(key),
+      );
+      const sortedMetric = metricSortKey(sortCol);
+      if (sortedMetric && !selectedMetrics.includes(sortedMetric)) {
+        sortCol = null;
+        sortDir = "desc";
       }
 
       const statsMap = new Map();
@@ -255,20 +295,48 @@
         <span class="filter-count">{filteredRuns.length} of {runsData.length} runs</span>
       {/if}
       {#if metricKeys.length > 0}
-        <label class="metric-picker">
-          <span>Metric columns:</span>
-          <select
-            value={selectedMetric}
-            onchange={(e) => selectMetric(e.target.value)}
+        <div
+          class="columns-picker"
+          use:clickOutside={() => (columnsMenuOpen = false)}
+        >
+          <button
+            class="columns-btn"
+            onclick={() => (columnsMenuOpen = !columnsMenuOpen)}
           >
-            <option value="">None</option>
-            {#each metricKeys as key}
-              <option value={key}>{key}</option>
-            {/each}
-          </select>
-        </label>
+            Metric columns{selectedMetrics.length
+              ? ` (${selectedMetrics.length})`
+              : ""}
+            <span class="caret">▾</span>
+          </button>
+          {#if columnsMenuOpen}
+            <div class="columns-panel">
+              <input
+                class="columns-filter"
+                type="text"
+                placeholder="Filter metrics…"
+                bind:value={columnsFilter}
+              />
+              <div class="columns-list">
+                {#each filteredMetricKeys as key}
+                  <label class="columns-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedMetrics.includes(key)}
+                      onchange={() => toggleMetricColumn(key)}
+                    />
+                    <span class="columns-item-label">{key}</span>
+                  </label>
+                {/each}
+                {#if filteredMetricKeys.length === 0}
+                  <div class="columns-empty">No metrics match</div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
+    <div class="table-scroll">
     <table class="runs-table">
       <thead>
         <tr>
@@ -294,18 +362,57 @@
           >
             Last Step <span class="sort-arrow">{sortArrow("lastStep")}</span>
           </th>
-          {#if selectedMetric}
-            {#each METRIC_AGGS as agg}
-              <th
-                class="sortable metric-col"
-                class:sorted={sortCol === agg}
-                title="{agg} of {selectedMetric}"
-                onclick={() => toggleSort(agg)}
-              >
-                {agg} <span class="sort-arrow">{sortArrow(agg)}</span>
-              </th>
-            {/each}
-          {/if}
+          {#each displayedMetrics as key}
+            <th
+              class="metric-col metric-col-header"
+              class:sorted={sortCol === METRIC_COL_PREFIX + key}
+            >
+              <div class="metric-col-head">
+                <button
+                  class="col-sort-btn"
+                  title="Sort by {aggFor(key)} of {key}"
+                  onclick={() => toggleSort(METRIC_COL_PREFIX + key)}
+                >
+                  {key}
+                  <span class="agg-suffix">· {aggFor(key)}</span>
+                  <span class="sort-arrow" class:visible={sortCol === METRIC_COL_PREFIX + key}>
+                    {sortArrow(METRIC_COL_PREFIX + key)}
+                  </span>
+                </button>
+                <span
+                  class="agg-menu-wrap"
+                  use:clickOutside={() => {
+                    if (openAggMenuKey === key) openAggMenuKey = null;
+                  }}
+                >
+                  <button
+                    class="kebab-btn"
+                    title="Choose aggregation for {key}"
+                    onclick={() =>
+                      (openAggMenuKey = openAggMenuKey === key ? null : key)}
+                  >
+                    ⋮
+                  </button>
+                  {#if openAggMenuKey === key}
+                    <div class="agg-menu">
+                      {#each METRIC_AGGS as agg}
+                        <button
+                          class="agg-option"
+                          class:active={aggFor(key) === agg}
+                          onclick={() => setAgg(key, agg)}
+                        >
+                          <span class="agg-check"
+                            >{aggFor(key) === agg ? "✓" : ""}</span
+                          >
+                          {agg}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </span>
+              </div>
+            </th>
+          {/each}
           {#if hasArtifacts}
             <th>Artifacts</th>
           {/if}
@@ -367,15 +474,13 @@
             </td>
             <td>{run.numSteps}</td>
             <td>{run.lastStep}</td>
-            {#if selectedMetric}
-              {#each METRIC_AGGS as agg}
-                <td class="metric-col">
-                  {formatMetricValue(
-                    metricValue(summaryMap, run, selectedMetric, agg),
-                  )}
-                </td>
-              {/each}
-            {/if}
+            {#each displayedMetrics as key}
+              <td class="metric-col">
+                {formatMetricValue(
+                  metricValue(summaryMap, run, key, aggFor(key)),
+                )}
+              </td>
+            {/each}
             {#if hasArtifacts}
               <td>
                 {#if run.outputs > 0 || run.inputs > 0}
@@ -406,8 +511,15 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 </div>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape") closeMenus();
+  }}
+/>
 
 <style>
   .runs-page {
@@ -458,22 +570,169 @@
     font-size: var(--text-sm, 12px);
     color: var(--body-text-color-subdued, #6b7280);
   }
-  .metric-picker {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
+  .columns-picker {
+    position: relative;
     margin-left: auto;
-    font-size: var(--text-sm, 12px);
-    color: var(--body-text-color-subdued, #6b7280);
   }
-  .metric-picker select {
-    font: inherit;
-    color: var(--body-text-color, #1f2937);
-    background: var(--background-fill-primary, white);
+  .columns-btn {
+    font-size: var(--text-sm, 12px);
+    padding: 5px 10px;
     border: 1px solid var(--border-color-primary, #e5e7eb);
     border-radius: var(--radius-sm, 4px);
-    padding: 3px 6px;
-    max-width: 280px;
+    background: var(--background-fill-primary, white);
+    color: var(--body-text-color, #1f2937);
+    cursor: pointer;
+  }
+  .columns-btn:hover {
+    border-color: var(--color-accent, #f97316);
+  }
+  .caret {
+    color: var(--body-text-color-subdued, #6b7280);
+  }
+  .columns-panel {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 30;
+    width: 300px;
+    max-width: 85vw;
+    max-height: 320px;
+    display: flex;
+    flex-direction: column;
+    background: var(--background-fill-primary, white);
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-lg, 8px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+    padding: 8px;
+  }
+  .columns-filter {
+    font: inherit;
+    font-size: var(--text-sm, 12px);
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-sm, 4px);
+    outline: none;
+    background: var(--background-fill-primary, white);
+    color: var(--body-text-color, #1f2937);
+  }
+  .columns-filter:focus {
+    border-color: var(--color-accent, #f97316);
+  }
+  .columns-list {
+    overflow-y: auto;
+  }
+  .columns-item {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    font-size: var(--text-sm, 12px);
+    color: var(--body-text-color, #1f2937);
+  }
+  .columns-item:hover {
+    background: var(--background-fill-secondary, #f9fafb);
+  }
+  .columns-item input {
+    flex-shrink: 0;
+    accent-color: var(--color-accent, #f97316);
+  }
+  .columns-item-label {
+    overflow-wrap: anywhere;
+  }
+  .columns-empty {
+    padding: 8px;
+    color: var(--body-text-color-subdued, #6b7280);
+    font-size: var(--text-sm, 12px);
+  }
+  .table-scroll {
+    overflow-x: auto;
+  }
+  .runs-table th.metric-col-header {
+    text-transform: none;
+    letter-spacing: normal;
+  }
+  .metric-col-head {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+    position: relative;
+  }
+  .col-sort-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+    padding: 0;
+    white-space: nowrap;
+  }
+  .col-sort-btn:hover {
+    color: var(--body-text-color, #1f2937);
+  }
+  .agg-suffix {
+    color: var(--body-text-color-subdued, #9ca3af);
+    font-weight: 500;
+  }
+  .kebab-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--body-text-color-subdued, #6b7280);
+    padding: 0 3px;
+    font-size: 14px;
+    line-height: 1.4;
+    border-radius: var(--radius-sm, 4px);
+  }
+  .kebab-btn:hover {
+    color: var(--body-text-color, #1f2937);
+    background: var(--background-fill-secondary, #f3f4f6);
+  }
+  .agg-menu-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .agg-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 20;
+    min-width: 90px;
+    background: var(--background-fill-primary, white);
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-sm, 6px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+  }
+  .agg-option {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: var(--text-sm, 12px);
+    text-transform: none;
+    letter-spacing: normal;
+    padding: 5px 8px;
+    border-radius: var(--radius-sm, 4px);
+    color: var(--body-text-color, #1f2937);
+    text-align: left;
+  }
+  .agg-option:hover {
+    background: var(--background-fill-secondary, #f9fafb);
+  }
+  .agg-option.active {
+    color: var(--color-accent, #f97316);
+    font-weight: 600;
+  }
+  .agg-check {
+    width: 1em;
   }
   .runs-table th.sortable {
     cursor: pointer;

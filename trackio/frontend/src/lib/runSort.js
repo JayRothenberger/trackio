@@ -1,4 +1,12 @@
 export const METRIC_AGGS = ["last", "min", "max"];
+export const METRIC_COL_PREFIX = "metric:";
+
+export function metricSortKey(col) {
+  if (typeof col !== "string" || !col.startsWith(METRIC_COL_PREFIX)) {
+    return null;
+  }
+  return col.slice(METRIC_COL_PREFIX.length);
+}
 
 export function buildSummaryMap(summaries) {
   const map = new Map();
@@ -14,13 +22,15 @@ export function metricValue(summaryMap, run, metric, agg) {
   return typeof value === "number" ? value : null;
 }
 
-export function sortRuns(runs, sortCol, sortDir, summaryMap, metric) {
+export function sortRuns(runs, sortCol, sortDir, summaryMap, metricAggs) {
   if (!sortCol) return runs;
   const dir = sortDir === "desc" ? -1 : 1;
+  const metric = metricSortKey(sortCol);
+  const agg = metric ? (metricAggs?.[metric] ?? "last") : null;
   const keyed = runs.map((run, index) => {
     let value;
-    if (METRIC_AGGS.includes(sortCol)) {
-      value = summaryMap ? metricValue(summaryMap, run, metric, sortCol) : null;
+    if (metric) {
+      value = summaryMap ? metricValue(summaryMap, run, metric, agg) : null;
     } else {
       value = run[sortCol] ?? null;
     }

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
+  METRIC_COL_PREFIX,
   buildSummaryMap,
   formatMetricValue,
+  metricSortKey,
   metricValue,
   sortRuns,
 } from "./runSort.js";
@@ -58,36 +60,64 @@ describe("metricValue", () => {
   });
 });
 
+describe("metricSortKey", () => {
+  test("decodes metric sort columns and rejects plain fields", () => {
+    expect(metricSortKey(`${METRIC_COL_PREFIX}train/acc`)).toBe("train/acc");
+    expect(metricSortKey("numSteps")).toBe(null);
+    expect(metricSortKey(null)).toBe(null);
+  });
+});
+
 describe("sortRuns", () => {
   const map = buildSummaryMap(summaries);
 
   test("returns runs unchanged without a sort column", () => {
-    expect(sortRuns(runs, null, "asc", map, "")).toEqual(runs);
+    expect(sortRuns(runs, null, "asc", map, {})).toEqual(runs);
   });
 
   test("sorts by plain run fields in both directions", () => {
-    expect(sortRuns(runs, "numSteps", "asc", map, "").map((r) => r.name)).toEqual(
+    expect(sortRuns(runs, "numSteps", "asc", map, {}).map((r) => r.name)).toEqual(
       ["a", "c", "b"],
     );
     expect(
-      sortRuns(runs, "numSteps", "desc", map, "").map((r) => r.name),
+      sortRuns(runs, "numSteps", "desc", map, {}).map((r) => r.name),
     ).toEqual(["b", "c", "a"]);
   });
 
   test("sorts by run name alphabetically", () => {
     const shuffled = [runs[2], runs[0], runs[1]];
-    expect(sortRuns(shuffled, "name", "asc", map, "").map((r) => r.name)).toEqual(
+    expect(sortRuns(shuffled, "name", "asc", map, {}).map((r) => r.name)).toEqual(
       ["a", "b", "c"],
     );
   });
 
-  test("sorts by metric aggregate with missing values last", () => {
+  test("sorts by a metric column using its chosen agg, missing values last", () => {
+    const col = `${METRIC_COL_PREFIX}train/acc`;
     expect(
-      sortRuns(runs, "max", "desc", map, "train/acc").map((r) => r.name),
+      sortRuns(runs, col, "desc", map, { "train/acc": "max" }).map((r) => r.name),
     ).toEqual(["b", "a", "c"]);
     expect(
-      sortRuns(runs, "max", "asc", map, "train/acc").map((r) => r.name),
+      sortRuns(runs, col, "asc", map, { "train/acc": "max" }).map((r) => r.name),
     ).toEqual(["a", "b", "c"]);
+  });
+
+  test("defaults a metric column's agg to last", () => {
+    const col = `${METRIC_COL_PREFIX}train/acc`;
+    expect(sortRuns(runs, col, "desc", map, {}).map((r) => r.name)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  test("changing the agg changes the order", () => {
+    const col = `${METRIC_COL_PREFIX}train/acc`;
+    expect(
+      sortRuns(runs, col, "desc", map, { "train/acc": "last" }).map((r) => r.name),
+    ).toEqual(["a", "b", "c"]);
+    expect(
+      sortRuns(runs, col, "desc", map, { "train/acc": "min" }).map((r) => r.name),
+    ).toEqual(["b", "a", "c"]);
   });
 
   test("is stable for equal values", () => {
@@ -96,13 +126,13 @@ describe("sortRuns", () => {
       { id: "y", name: "y", numSteps: 5 },
     ];
     expect(
-      sortRuns(equal, "numSteps", "desc", map, "").map((r) => r.name),
+      sortRuns(equal, "numSteps", "desc", map, {}).map((r) => r.name),
     ).toEqual(["x", "y"]);
   });
 
   test("does not mutate the input array", () => {
     const copy = [...runs];
-    sortRuns(runs, "numSteps", "desc", map, "");
+    sortRuns(runs, "numSteps", "desc", map, {});
     expect(runs).toEqual(copy);
   });
 });
