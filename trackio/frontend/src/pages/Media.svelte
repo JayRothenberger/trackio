@@ -304,8 +304,12 @@
         <p>Select runs in the sidebar to browse media and tables.</p>
         <pre><code>{'import trackio\ntrackio.init(project="my-project")\ntrackio.log({"loss": 0.5})\ntrackio.finish()'}</code></pre>
       {:else}
-        <h2>No media or tables in this run</h2>
-        <p>Log images, video, audio, and tables by passing Trackio objects to <code>trackio.log()</code>:</p>
+        <h2>
+          {selectedRuns.length === 1
+            ? "No media or tables in this run"
+            : `No media or tables in the ${selectedRuns.length} selected runs`}
+        </h2>
+        <p>None of the selected runs logged media. Log images, video, audio, and tables by passing Trackio objects to <code>trackio.log()</code>:</p>
         <pre><code>{'import trackio\n\ntrackio.init(project="my-project")\ntrackio.log({"plot": trackio.Image("figure.png")})\ntrackio.log({"clip": trackio.Video("output.mp4")})\ntrackio.log({"audio": trackio.Audio("speech.wav")})\ntrackio.log({"report": trackio.Html("<h1>Results</h1>")})\n\nimport pandas as pd\ndf = pd.DataFrame({"epoch": [0, 1], "acc": [0.9, 0.95]})\ntrackio.log({"samples": trackio.Table(dataframe=df)})'}</code></pre>
         <p>Each type appears in its own section here once logged.</p>
       {/if}
