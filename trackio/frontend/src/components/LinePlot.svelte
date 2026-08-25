@@ -155,6 +155,7 @@
     const yEnc = {
       field: y,
       type: "quantitative",
+      scale: { zero: false },
     };
     const colorEnc = hasColor
       ? {
