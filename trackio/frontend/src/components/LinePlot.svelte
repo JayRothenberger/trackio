@@ -18,7 +18,6 @@
     colorMap = {},
     title = "",
     xLim = null,
-    yExtent = undefined,
     onSelect = null,
     onResetZoom = null,
     draggable = false,
@@ -35,6 +34,8 @@
 
   let lastStructuralKey = null;
   let lastHasSmoothed = false;
+  let isVisible = false;
+  let pendingRender = false;
   let resolvedColorLabel = $derived(colorLabel || colorField);
   let resolvedDashLabel = $derived(dashLabel || dashField);
   let resolvedYLabel = $derived(yLabel || (y.includes("/") ? y.split("/").pop() : y));
@@ -123,10 +124,8 @@
     return { originalData, smoothedData, hasSmoothed: smoothedData.length > 0 };
   }
 
-  function computeXDomain(originalData) {
-    const xVals = originalData.map((d) => d[x]).filter((v) => v != null);
+  function computeXDomain() {
     if (xLim) return [xLim[0], xLim[1]];
-    if (xVals.length > 0) return [Math.min(...xVals), Math.max(...xVals)];
     return undefined;
   }
 
@@ -146,7 +145,7 @@
 
     const { originalData, smoothedData, hasSmoothed } = splitData();
     lastHasSmoothed = hasSmoothed;
-    const xDomain = computeXDomain(originalData);
+    const xDomain = computeXDomain();
 
     const xEnc = {
       field: x,
@@ -156,7 +155,6 @@
     const yEnc = {
       field: y,
       type: "quantitative",
-      ...(yExtent ? { scale: { domain: yExtent } } : {}),
     };
     const colorEnc = hasColor
       ? {
@@ -304,11 +302,8 @@
   }
 
   function getStructuralKey() {
-    const { originalData } = splitData();
-    const xDomain = computeXDomain(originalData);
-    const xKey = xDomain ? `${xDomain[0]},${xDomain[1]}` : "auto";
-    const yKey = yExtent ? `${yExtent[0]},${yExtent[1]}` : "auto";
-    return `${y}\0${x}\0${colorSpecKey}\0${dashSpecKey}\0${title}\0${fullscreen}\0${!!onSelect}\0${xKey}\0${yKey}`;
+    const xKey = xLim ? `${xLim[0]},${xLim[1]}` : "auto";
+    return `${y}\0${x}\0${colorSpecKey}\0${dashSpecKey}\0${title}\0${fullscreen}\0${!!onSelect}\0${xKey}`;
   }
 
   function replaceDataset(v, name, newData) {
@@ -387,6 +382,11 @@
 
   async function render() {
     if (!container || !data || data.length === 0 || !y) return;
+    if (!isVisible && !fullscreen) {
+      pendingRender = true;
+      return;
+    }
+    pendingRender = false;
 
     const structuralKey = getStructuralKey();
     if (view && structuralKey === lastStructuralKey) {
@@ -530,11 +530,27 @@
     colorSpecKey;
     dashSpecKey;
     xLim;
-    yExtent;
     title;
     fullscreen;
     container;
     render();
+  });
+
+  $effect(() => {
+    if (!plotContainer) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          isVisible = entry.isIntersecting;
+          if (isVisible && pendingRender) {
+            render();
+          }
+        }
+      },
+      { rootMargin: "300px" },
+    );
+    io.observe(plotContainer);
+    return () => io.disconnect();
   });
 
   $effect(() => {
@@ -821,6 +837,7 @@
 <style>
   .plot-container {
     min-width: 350px;
+    min-height: 240px;
     flex: 1;
     background: var(--background-fill-primary, white);
     border: 1px solid var(--border-color-primary, #e5e7eb);

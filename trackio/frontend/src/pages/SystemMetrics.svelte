@@ -552,7 +552,6 @@
             {#each orderedDirect as metric, i}
               {@const plotResult = plotDataByMetric.get(metric) ?? { data: [], yExtent: undefined }}
               {@const plotData = plotResult.data}
-              {@const yExtent = plotResult.yExtent}
               {#if plotData.length > 0}
                 <LinePlot
                   data={plotData}
@@ -563,7 +562,6 @@
                   colorField="series_key"
                   colorDisplayField="run"
                   {xLim}
-                  {yExtent}
                   onSelect={handlePlotSelect}
                   onResetZoom={handleResetZoom}
                   draggable={true}
@@ -583,7 +581,6 @@
                 {@const plotKey = `sys:${groupName}:compare:${metricName}`}
                 {@const plotResult = comparisonPlotsByKey.get(plotKey) ?? { data: [], yExtent: undefined }}
                 {@const plotData = plotResult.data}
-                {@const yExtent = plotResult.yExtent}
                 {#if plotData.length > 0}
                   <LinePlot
                     data={plotData}
@@ -598,7 +595,6 @@
                     dashField="device"
                     dashLabel="Device"
                     {xLim}
-                    {yExtent}
                     onSelect={handlePlotSelect}
                     onResetZoom={handleResetZoom}
                     draggable={true}

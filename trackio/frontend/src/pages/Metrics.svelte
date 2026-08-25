@@ -81,8 +81,16 @@
       : histogramMetrics,
   );
 
+  let plotResults = $derived.by(() => {
+    const map = new Map();
+    for (const metric of metrics) {
+      map.set(metric, computeMetricPlotData(masterData, xColumn, metric, xLim));
+    }
+    return map;
+  });
+
   function getPlotResult(metric) {
-    return computeMetricPlotData(masterData, xColumn, metric, xLim);
+    return plotResults.get(metric) ?? { data: [], yExtent: undefined };
   }
 
   function getGroupCols(items) {
@@ -425,7 +433,6 @@
             {#each orderedDirect as metric, i}
               {@const plotResult = getPlotResult(metric)}
               {@const plotData = plotResult.data}
-              {@const yExtent = plotResult.yExtent}
               {@const useBar = singlePointMetrics.has(metric)}
               {@const directTitle = showHeaders ? metric.split("/").slice(1).join("/") || metric : metric}
               {#if plotData.length > 0}
@@ -452,7 +459,6 @@
                     colorDisplayField="run"
                     {colorMap}
                     {xLim}
-                    {yExtent}
                     onSelect={handlePlotSelect}
                     onResetZoom={handleResetZoom}
                     draggable={true}
@@ -480,7 +486,6 @@
                 {#each orderedSub as metric, i}
                   {@const plotResult = getPlotResult(metric)}
                   {@const plotData = plotResult.data}
-                  {@const yExtent = plotResult.yExtent}
                   {@const useBar = singlePointMetrics.has(metric)}
                   {@const subTitle = showHeaders ? metric.split("/").slice(2).join("/") || metric : metric}
                   {#if plotData.length > 0}
@@ -507,7 +512,6 @@
                         colorDisplayField="run"
                         {colorMap}
                         {xLim}
-                        {yExtent}
                         onSelect={handlePlotSelect}
                         onResetZoom={handleResetZoom}
                         draggable={true}
